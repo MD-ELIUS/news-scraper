@@ -1,10 +1,36 @@
+const express = require("express");
 const axios = require("axios");
 const cheerio = require("cheerio");
+
+const app = express();
+const PORT = process.env.PORT || 3008;
 
 const BASE_URL = "https://www.dailyamardesh.com";
 const URL = BASE_URL + "/latest";
 
-const WEBHOOK_URL = "https://n8n-0g84.onrender.com/webhook/news";
+// এনভায়রনমেন্ট ভেরিয়েবল
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const SCRAPER_KEY = process.env.SCRAPER_KEY;
+
+// Axios instance with 60s timeout for scraping
+const scrapeAxios = axios.create({
+  timeout: 60000,
+  headers: {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+  }
+});
+
+// Axios instance with 30s timeout for webhook
+const webhookAxios = axios.create({
+  timeout: 30000
+});
+
+app.use(express.json());
+
+// Health check endpoint
+app.get("/", (req, res) => {
+  res.send("Amar Desh Scraper is running!");
+});
 
 // ==========================
 // 🇧🇩 BD TIME HELPERS
@@ -19,8 +45,8 @@ function extractTime(text) {
   if (!text) return null;
 
   const bnToEn = {
-    "০":"0","১":"1","২":"2","৩":"3","৪":"4",
-    "৫":"5","৬":"6","৭":"7","৮":"8","৯":"9"
+    "০": "0", "১": "1", "২": "2", "৩": "3", "৪": "4",
+    "৫": "5", "৬": "6", "৭": "7", "৮": "8", "৯": "9"
   };
 
   let cleanText = text
@@ -41,58 +67,38 @@ function extractTime(text) {
   return { hour, min };
 }
 
-function timeToMinutes(t) {
-  if (!t) return -1;
-  return t.hour * 60 + t.min;
-}
-
-// ==========================
-// CHECK 10 MIN RULE
-// ==========================
-
-function isWithin10Min(text) {
+function isWithinLimit(text, limit = 2) {
   const t = extractTime(text);
-
-  if (!t) {
-    console.log("⛔ No time found → SKIP");
-    return false;
-  }
+  if (!t) return false;
 
   const now = getBDNow();
-
   const newsTime = new Date(now);
   newsTime.setHours(t.hour);
   newsTime.setMinutes(t.min);
   newsTime.setSeconds(0);
 
+  if (newsTime > now) {
+    newsTime.setDate(newsTime.getDate() - 1);
+  }
+
   const diffMin = (now - newsTime) / 60000;
-
-  console.log("🇧🇩 BD NOW:", now.toLocaleTimeString());
-  console.log("⏱ AGE:", diffMin.toFixed(2), "min");
-
-  return diffMin >= 0 && diffMin <= 10;
+  return diffMin >= 0 && diffMin <= limit;
 }
 
 // ==========================
-// SCRAPE LIST
+// SCRAPE LOGIC
 // ==========================
 
 async function scrapeNews() {
   try {
     console.log("🚀 Scraping started...");
-
-    const { data } = await axios.get(URL, {
-      headers: { "User-Agent": "Mozilla/5.0" }
-    });
-
+    const { data } = await scrapeAxios.get(URL);
     const $ = cheerio.load(data);
 
     const newsList = [];
-
     $("article").each((i, el) => {
       const title = $(el).find("h2 span").text().trim();
       const link = $(el).find("a").attr("href");
-
       if (title && link) {
         newsList.push({
           title,
@@ -101,79 +107,53 @@ async function scrapeNews() {
       }
     });
 
-    console.log("📦 Total scraped:", newsList.length);
+    console.log("📦 Total discovered:", newsList.length);
 
-    // ==========================
-    // DETAILS FETCH + TIME ATTACH
-    // ==========================
+    const LIMIT = 5;
+    const recentList = newsList.slice(0, LIMIT);
+    const processed = [];
 
-    for (let i = 0; i < newsList.length; i++) {
-      const details = await scrapeDetails(newsList[i].link);
+    for (let i = 0; i < recentList.length; i++) {
+      const item = recentList[i];
+      console.log(`\n[${i + 1}/${LIMIT}] 📰 ${item.title}`);
 
-      newsList[i].description = details.description;
-      newsList[i].image = details.image;
-
+      const details = await scrapeDetails(item.link);
       const t = extractTime(details.description);
-      newsList[i].timeValue = timeToMinutes(t);
 
-      console.log("📰 Parsed:", newsList[i].title, "→", newsList[i].timeValue);
-    }
+      if (t) {
+        if (!isWithinLimit(details.description, 2)) {
+          console.log("⛔ SKIPPED (OLD NEWS)");
+          continue;
+        }
 
-    // ==========================
-    // 🔥 FIXED SORT (LATEST FIRST)
-    // ==========================
+        console.log("✅ SENDING TO WEBHOOK...");
+        const payload = {
+          title: item.title,
+          description: details.description,
+          link: item.link,
+          image: details.image || "",
+          source: "dailyamardesh",
+          sourceBangla: "দৈনিক আমার দেশ",
+          sourceTime: details.sourceTime
+        };
 
-    newsList.sort((a, b) => {
-      const timeA = a.timeValue === -1 ? -Infinity : a.timeValue;
-      const timeB = b.timeValue === -1 ? -Infinity : b.timeValue;
-
-      return timeA - timeB;
-    });
-
-    console.log("\n✅ SORT DONE\n");
-
-    // ==========================
-    // SEND FILTERED NEWS
-    // ==========================
-
-    for (let i = 0; i < newsList.length; i++) {
-      const news = newsList[i];
-
-      console.log("\n=====================");
-      console.log("📰 TITLE:", news.title);
-      console.log("📝 DESC:", news.description);
-      console.log("🖼 IMAGE:", news.image);
-
-      if (!isWithin10Min(news.description)) {
-        console.log("⛔ SKIPPED (OLD NEWS)");
-        continue;
+        await sendToWebhook(payload);
+        processed.push(payload);
+      } else {
+        console.log("⛔ No time found — skipping");
       }
-
-      await sendToN8N({
-        title: news.title,
-        link: news.link,
-        description: news.description,
-        image: news.image
-      });
     }
 
-    console.log("\n🎉 DONE!");
-
+    return processed;
   } catch (err) {
-    console.log("❌ Error:", err.message);
+    console.error("❌ Scrape Error:", err.message);
+    throw err;
   }
 }
 
-// ==========================
-// DETAILS SCRAPER
-// ==========================
-
 async function scrapeDetails(url) {
   try {
-    const { data } = await axios.get(url, {
-      headers: { "User-Agent": "Mozilla/5.0" }
-    });
-
+    const { data } = await scrapeAxios.get(url);
     const $ = cheerio.load(data);
 
     const paragraphs = $("article p")
@@ -181,7 +161,19 @@ async function scrapeDetails(url) {
       .get()
       .filter(p => p.length > 30);
 
-    const description = paragraphs.slice(0, 2).join(" ");
+    const description = paragraphs.join(" ");
+    const firstParagraph = paragraphs[0] || "";
+    const timeObj = extractTime(firstParagraph);
+
+    let sourceTime = new Date().toISOString();
+    if (timeObj) {
+      const now = getBDNow();
+      const articleTime = new Date(now);
+      articleTime.setHours(timeObj.hour);
+      articleTime.setMinutes(timeObj.min);
+      articleTime.setSeconds(0);
+      sourceTime = articleTime.toISOString();
+    }
 
     const image =
       $('meta[property="og:image"]').attr("content") ||
@@ -189,29 +181,46 @@ async function scrapeDetails(url) {
       $("article img").first().attr("src") ||
       "";
 
-    return { description, image };
-
+    return { description, image, sourceTime };
   } catch (err) {
-    return { description: "", image: "" };
+    return { description: "", image: "", sourceTime: new Date().toISOString() };
   }
 }
 
-// ==========================
-// SEND TO N8N
-// ==========================
-
-async function sendToN8N(news) {
+async function sendToWebhook(news) {
+  if (!WEBHOOK_URL) {
+    console.log("⚠️ WEBHOOK_URL not set, skipping send");
+    return;
+  }
   try {
-    await axios.post(WEBHOOK_URL, news);
-    console.log("📤 SENT:", news.title);
+    await webhookAxios.post(WEBHOOK_URL, news);
+    console.log("📤 SENT SUCCESSFULLY");
   } catch (err) {
-    console.log("❌ N8N ERROR:", err.message);
+    console.log("❌ WEBHOOK ERROR:", err.message);
   }
 }
 
-// RUN
-if (require.main === module) {
-  scrapeNews();
-}
+// ==========================
+// ENDPOINTS
+// ==========================
 
-module.exports = scrapeNews;
+app.get("/scrape", async (req, res) => {
+  const key = req.query.key || req.headers["x-scraper-key"];
+
+  if (SCRAPER_KEY && key !== SCRAPER_KEY) {
+    console.log("🔒 Unauthorized access attempt");
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const data = await scrapeNews();
+    res.json({ success: true, count: data.length, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🔗 Endpoint: http://localhost:${PORT}/scrape`);
+});
