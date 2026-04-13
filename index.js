@@ -109,19 +109,18 @@ async function scrapeNews() {
 
     console.log("📦 Total discovered:", newsList.length);
 
-    const LIMIT = 5;
-    const recentList = newsList.slice(0, LIMIT);
+    const recentList = newsList;
     const processed = [];
 
     for (let i = 0; i < recentList.length; i++) {
       const item = recentList[i];
-      console.log(`\n[${i + 1}/${LIMIT}] 📰 ${item.title}`);
+      console.log(`\n[${i + 1}/${recentList.length}] 📰 ${item.title}`);
 
       const details = await scrapeDetails(item.link);
       const t = extractTime(details.description);
 
       if (t) {
-        if (!isWithinLimit(details.description, 2)) {
+        if (!isWithinLimit(details.description, 10)) {
           console.log("⛔ SKIPPED (OLD NEWS)");
           continue;
         }
