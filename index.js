@@ -1,4 +1,4 @@
-const express = require("express");
+﻿const express = require("express");
 const axios = require("axios");
 const cheerio = require("cheerio");
 
@@ -9,8 +9,8 @@ const BASE_URL = "https://www.dailyamardesh.com";
 const URL = BASE_URL + "/latest";
 
 // এনভায়রনমেন্ট ভেরিয়েবল
-const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const SCRAPER_KEY = process.env.SCRAPER_KEY;
+const WEBHOOK_URL = process.env.WEBHOOK_URL ;
+const SCRAPER_KEY = process.env.SCRAPER_KEY ;
 
 // Axios instance with 60s timeout for scraping
 const scrapeAxios = axios.create({
